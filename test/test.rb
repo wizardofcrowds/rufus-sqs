@@ -7,6 +7,7 @@ require 'test/unit'
 
 require 'yaml'
 require 'base64'
+require 'digest/md5'
 
 require 'rufus/sqs'
 
@@ -23,20 +24,22 @@ class SqsTest < Test::Unit::TestCase
 
         qs = Rufus::SQS::QueueService.new
 
-        qs.create_queue "mytestqueue"
+        queue_name = Digest::MD5.hexdigest(rand.to_s + Time.now.to_s)[0..20]
+
+        qs.create_queue queue_name
 
         msg = "hello SQS world !"
 
-        msg_id = qs.put_message "mytestqueue", msg
+        msg_id = qs.put_message queue_name, msg
 
         sleep 1
 
-        msgs = qs.get_messages "mytestqueue"
+        msgs = qs.get_messages queue_name
 
         assert_equal 1, msgs.size
         assert_equal msg, msgs[0].message_body
 
-        qs.delete_queue "mytestqueue"
+        qs.delete_queue queue_name
     end
 
     def test_0
@@ -51,37 +54,46 @@ class SqsTest < Test::Unit::TestCase
 
         qs = Rufus::SQS::QueueService.new
 
-        qs.create_queue(:yamltest)
+        queue_name = Digest::MD5.hexdigest(rand.to_s + Time.now.to_s)[0..20]
 
-        puts "created queue 'yamltest'"
+        qs.create_queue(queue_name)
+
+        puts "created queue #{queue_name}"
+
+        queue = qs.get_queue_attributes(queue_name)
+        assert_equal 0, queue.approximate_number_of_messages
 
         msg = YAML.dump(hash)
         msg = Base64.encode64(msg)
 
         puts "message size is #{msg.size.to_f / 1024.0} K"
 
-        msg_id = qs.put_message(:yamltest, msg)
+        qs.send_message(queue_name, msg)
 
-        puts "sent hash as message, msg_id is #{msg_id}"
+        puts "sent hash as message"
 
         sleep 1
 
-        msg = qs.get_message(:yamltest, msg_id)
+        msgs = qs.get_messages(queue_name)
 
-        puts "got message back"
-
-        msg = Base64.decode64(msg.message_body)
+        puts "got messages back"
+        
+        msg = Base64.decode64(msgs[0].message_body)
         msg = YAML.load(msg)
 
         pp msg
 
         assert_equal msg, hash
 
-        count = qs.flush_queue(:yamltest)
+        qs.delete_message(queue_name, msgs[0].receipt_handle)
 
-        puts "flushed #{count} messages from queue 'yamltest'"
+        puts "deleted the message from queue #{queue_name}"
 
-        qs.delete_queue(:yamltest)
+        sleep 1
+
+        assert_equal 0, qs.get_messages(queue_name).size
+
+        qs.delete_queue(queue_name)
     end
 end
 

@@ -23,9 +23,13 @@
 #
 
 #
-# Made in Japan
+# Made in Japan, by:
 #
-# John dot Mettraux at OpenWFE dot org
+#   John dot Mettraux at OpenWFE dot org
+#
+# and Modified by a Japanese in Canada:
+#
+#   Koichi Hirano, internalist aaaat gmail doooot com
 #
 
 require 'base64'
@@ -47,13 +51,13 @@ module SQS
     #
     class Message
 
-        attr_reader :queue, :message_id, :message_body
+        attr_reader :queue, :message_body, :receipt_handle
 
         def initialize (queue, xml_element)
 
             @queue = queue
-            @message_id = SQS::get_element_text(xml_element, "MessageId")
-            @message_body = SQS::get_element_text(xml_element, "MessageBody")
+            @receipt_handle = SQS::get_element_text(xml_element, "ReceiptHandle")
+            @message_body = SQS::get_element_text(xml_element, "Body")
         end
 
         #
@@ -61,7 +65,8 @@ module SQS
         #
         def delete
 
-            @queue.queue_service.delete_message(@queue, @message_id)
+            @queue.queue_service.delete_message(@queue, @receipt_handle)
+            
         end
     end
 
@@ -72,16 +77,21 @@ module SQS
     class Queue
 
         attr_reader :queue_service, :host, :path, :name
+        attr_accessor :approximate_number_of_messages, :visibility_timeout
 
         def initialize (queue_service, xml_element)
 
             @queue_service = queue_service
 
             s = xml_element.text.to_s
-            m = Regexp.compile('^http://(.*)(/.*)(/.*$)').match(s)
+
+            m = Regexp.compile('^http://(.*)(/.*)').match(s)
             @host = m[1]
-            @name = m[3][1..-1]
-            @path = m[2] + m[3]
+            @name = m[2][1..-1]
+            @path = m[2]
+            
+            @approximate_number_of_messages = nil
+            @visibility_timeout = nil
         end
     end
 
@@ -90,7 +100,7 @@ module SQS
     #
     class QueueService
 
-        AWS_VERSION = "2006-04-01"
+        AWS_VERSION = "2008-01-01"
         DEFAULT_QUEUE_HOST = "queue.amazonaws.com"
 
         def initialize (queue_host=nil)
@@ -106,16 +116,16 @@ module SQS
         def list_queues (prefix=nil)
 
             queues = []
+            
+            request_params = {}
+            
+            request_params["Action"] = "ListQueues"
+            request_params["QueueNamePrefix"] = prefix if prefix
 
-            path = "/"
-            path = "#{path}?QueueNamePrefix=#{prefix}" if prefix
-
-            doc = do_action :get, @queue_host, path
-
+            doc = do_action :get, @queue_host, "", request_params
             doc.elements.each("//QueueUrl") do |e|
-                queues << Queue.new(self, e)
+                queues << get_queue_attributes(Queue.new(self, e))
             end
-
             return queues
         end
 
@@ -125,9 +135,15 @@ module SQS
         # If the queue name doesn't comply with SQS requirements for it,
         # an error will be raised.
         #
-        def create_queue (queue_name)
+        def create_queue (queue_name, visibility_timeout = 30)
+          
+            params = {}
+            params["Action"] = "CreateQueue"
+            params["QueueName"] = queue_name
+            params["DefaultVisibilityTimeout"] = visibility_timeout
 
-            doc = do_action :post, @queue_host, "/?QueueName=#{queue_name}"
+
+            doc = do_action :post, @queue_host, "/", params
 
             doc.elements.each("//QueueUrl") do |e|
                 return e.text.to_s
@@ -137,29 +153,28 @@ module SQS
         #
         # Given some content ('text/plain' content), send it as a message to
         # a queue.
-        # Returns the SQS message id (a String).
+        # Returns true if successful.
         #
         # The queue might be a queue name (String) or a Queue instance.
         #
-        def put_message (queue, content)
+        def send_message (queue, content)
 
             queue = resolve_queue(queue)
 
-            doc = do_action :put, queue.host, "#{queue.path}/back", content
+            params = {}
+            params["Action"] = "SendMessage"
+            params["MessageBody"] = content
+            params["QueueName"] = queue.name
+            
+            doc = do_action :get, queue.host, "/#{queue.name}", params
 
-            #puts doc.to_s
-
-            #status_code = SQS::get_element_text(doc, '//StatusCode')
-            #message_id = SQS::get_element_text(doc, '//MessageId')
-            #request_id = SQS::get_element_text(doc, '//RequestId')
-            #{ :status_code => status_code, 
-            #  :message_id => message_id, 
-            #  :request_id => request_id }
-
-            SQS::get_element_text(doc, '//MessageId')
+            SQS::get_element_text(doc, '//MessageId') # This is to verify if MessageId exists in the response. 
+            
+            return true # Not return MessageId anymore as MessageId is not reusable anywhere else in SQS API 2008-01-01
         end
 
-        alias :send_message :put_message
+        alias :put_message :send_message
+        alias :post_message :send_message
 
         #
         # Retrieves a bunch of messages from a queue. Returns a list of
@@ -167,9 +182,9 @@ module SQS
         #
         # There are actually two optional params that this method understands :
         #
-        # - :timeout  the duration in seconds of the message visibility in the
+        # - :VisibilityTimeout  the duration in seconds of the message visibility in the
         #             queue
-        # - :count    the max number of message to be returned by this call
+        # - :MaxNumberOfMessages    the max number of message to be returned by this call, upto 10
         #
         # The queue might be a queue name (String) or a Queue instance.
         #
@@ -177,18 +192,9 @@ module SQS
 
             queue = resolve_queue(queue)
 
-            path = "#{queue.path}/front"
+            params["Action"] = "ReceiveMessage"
 
-            path += "?" if params.size > 0
-
-            timeout = params[:timeout]
-            count = params[:count]
-
-            path += "VisibilityTimeout=#{timeout}" if timeout
-            path += "&" if timeout and count
-            path += "NumberOfMessages=#{count}" if count
-
-            doc = do_action :get, queue.host, path
+            doc = do_action :get, queue.host, "/#{queue.name}", params
 
             messages = []
 
@@ -199,100 +205,51 @@ module SQS
             messages
         end
 
-        #
-        # Retrieves a single message from a queue. Returns an instance of
-        # Message.
-        #
-        # The queue might be a queue name (String) or a Queue instance.
-        #
-        def get_message (queue, message_id)
-
-            queue = resolve_queue(queue)
-
-            path = "#{queue.path}/#{message_id}"
-
-            begin
-                doc = do_action :get, queue.host, path
-                Message.new(queue, doc.root.elements[1])
-            rescue Exception => e
-                #puts e.message
-                return nil if e.message.match "^404 .*$"
-                raise e
-            end
-        end
 
         #
         # Deletes a given message.
         #
         # The queue might be a queue name (String) or a Queue instance.
+        # The receipt_handle of a message can be found in a returned message of get_messages call.        
+        # If fails, e.g. authentication error, will raise an exception due to 403
         #
-        def delete_message (queue, message_id)
+        def delete_message (queue, receipt_handle)
 
             queue = resolve_queue(queue)
 
-            path = "#{queue.path}/#{message_id}"
-            #path = "#{queue.path}/#{CGI::escape(message_id)}"
+            params = {}            
+            params["Action"] = "DeleteMessage"
+            params["ReceiptHandle"] =  receipt_handle
 
-            doc = do_action :delete, queue.host, path
+            doc = do_action :get, queue.host, "/#{queue.name}", params
 
-            SQS::get_element_text(doc, "//StatusCode") == "Success"
         end
 
         #
-        # Use with care !
-        #
-        # Attempts at deleting all the messages in a queue.
-        # Returns the total count of messages deleted.
-        #
-        # A call on this method might take a certain time, as it has
-        # to delete each message individually. AWS will perhaps
-        # add a proper 'flush_queue' method later.
-        #
-        # The queue might be a queue name (String) or a Queue instance.
+        # flush_queue is not a native action and there is no gurantee that this kind of method 
+        # can actually delete all the message due to the visibility timeout.
+        # now flushe_queue does nothing
         #
         def flush_queue (queue)
-
-            count = 0
-
-            loop do
-
-                l = get_messages queue, :timeout => 0, :count => 255
-
-                break if l.length < 1
-
-                l.each do |m|
-                    m.delete
-                    count += 1
-                end
-            end
-
-            count
+          
+          pp "Obsolete Action - nothing done"
+          
         end
 
         #
         # Deletes the queue. Returns true if the delete was successful.
-        # You can empty a queue by called the method #flush_queue
+        # This call will delete the queue even if there remain some messages in the queue.
+        # So, be careful.
         #
-        # If 'force' is set to true, a flush will be performed on the
-        # queue before the actual delete operation. It should ensure
-        # a successful removal of the queue.
-        #
-        def delete_queue (queue, force=false)
+        def delete_queue (queue)
 
             queue = resolve_queue(queue)
-
-            flush_queue(queue) if force
             
-            begin
+            params = {}            
+            params["Action"] = "DeleteQueue"
 
-                doc = do_action :delete, @queue_host, queue.path
+            doc = do_action :get, @queue_host, "/#{queue.name}", params
 
-            rescue Exception => e
-
-                return false if e.message.match "^400 .*$"
-            end
-
-            SQS::get_element_text(doc, "//StatusCode") == "Success"
         end
 
         #
@@ -303,11 +260,70 @@ module SQS
             l = list_queues(queue_name)
 
             l.each do |q|
-                return q if q.name == queue_name
+                if q.name == queue_name
+                  get_queue_attributes(q)
+                  return q 
+                end
             end
 
-            #return nil
             raise "found no queue named '#{queue_name}'"
+        end
+        
+        #
+        # Gets attributes of a queue, and returns a Queue instance with updated attribute values.
+        #
+        # Attributes to be obtained are:
+        #   VisibilityTimeout - The length of time (in seconds) that a message that has been 
+        #                       received from a queue will be invisible to other receiving 
+        #                       components when they ask to receive messages. During the visibility 
+        #                       timeout, the component that received the message usually processes 
+        #                       the message and then deletes it from the queue.
+        #   ApproximateNumberOfMessages - the approximate number of messages in the queue
+        #
+        def get_queue_attributes(queue)
+          
+          queue = resolve_queue(queue)
+          
+          params = {}
+          params["Action"] = "GetQueueAttributes"
+          params["AttributeName"] = "All"
+
+          doc = do_action :get, @queue_host, "/#{queue.name}", params
+
+          doc.elements.each("//Attribute") do |me|
+            case me.elements["Name"].text
+            when "VisibilityTimeout"
+              queue.visibility_timeout = me.elements["Value"].text.to_i
+            when "ApproximateNumberOfMessages"
+              queue.approximate_number_of_messages =  me.elements["Value"].text.to_i
+            else
+              #nothing
+            end
+          end
+
+          return queue
+        end
+
+        #
+        # Sets attributes of a queue, and returns a Queue instance with updated attribute values.
+        #
+        # Only attribute to be updated today is:
+        #   VisibilityTimeout - The length of time (in seconds) that a message that has been 
+        #                       received from a queue will be invisible to other receiving 
+        #                       components when they ask to receive messages. During the visibility 
+        #                       timeout, the component that received the message usually processes 
+        #                       the message and then deletes it from the queue.
+        #
+        def set_queue_attributes(queue, param)
+
+          queue = resolve_queue(queue)
+          params = {}
+          params["VisibilityTimeout"] = param["VisibilityTimeout"]
+          params["Action"] = "SetQueueAttributes"
+
+          doc = do_action :get, @queue_host, "/#{queue.name}", params
+
+          return get_queue_attributes(queue)
         end
 
         protected
@@ -323,20 +339,23 @@ module SQS
                 get_queue queue.to_s
             end
 
-            def do_action (action, host, path, content=nil)
+            def do_action (action, host, path, params, content=nil)
 
                 date = Time.now.httpdate
 
+                raise "No $AMAZON_ACCESS_KEY_ID env variable found" unless ENV['AMAZON_ACCESS_KEY_ID']
+                params["AWSAccessKeyId"] = ENV['AMAZON_ACCESS_KEY_ID']
+                params["SignatureVersion"] = 1                
+                params["Timestamp"] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+                params["Version"] = AWS_VERSION
+
+                path += "?" + params.sort_by {|v| v[0].downcase }.collect{|p| p[0].to_s + "=" + URI.encode(p[1].to_s, Regexp.new("[^#{URI::PATTERN::UNRESERVED}]"))}.join("&")
+                str_to_sign = params.sort_by {|v| v[0].downcase }.collect{|p| p[0].to_s + p[1].to_s}.join("")
+                path += "&Signature=#{hmac_sha1_signature(str_to_sign)}"
                 h = {}
 
-                h['AWS-Version'] = AWS_VERSION
-                h['Date'] = date
                 h['Content-type'] = 'text/plain'
-
                 h['Content-length'] = content.length.to_s if content
-
-                h['Authorization'] = generate_auth_header(
-                    action, path, date, "text/plain")
 
                 res = Rufus::Verbs::EndPoint.request(
                     action, 
@@ -345,19 +364,13 @@ module SQS
                     :d => content,
                     :headers => h)
 
-                #case res
-                #when Net::HTTPSuccess, Net::HTTPRedirection
-                #    doc = REXML::Document.new(res.read_body)
-                #else
-                #    doc = res.error!
-                #end
-                doc = if res.is_a?(Net::HTTPSuccess)
-                    REXML::Document.new(res.read_body)
+                case res
+                when Net::HTTPSuccess, Net::HTTPRedirection, Net::HTTPClientError
+                    doc = REXML::Document.new(res.read_body)
+                    raise_errors(doc)
                 else
-                    res.error!
+                    doc = res.error!
                 end
-
-                raise_errors doc
 
                 doc
             end
@@ -370,53 +383,31 @@ module SQS
 
                 doc.elements.each("//Error") do |e|
 
-                    code = get_element_text(e, "Code")
+                    code = SQS.get_element_text(e, "Code")
                     return unless code
 
-                    message = get_element_text(e, "Message")
-                    raise "Rufus::SQS::#{code} : #{m.text.to_s}"
+                    message = SQS.get_element_text(e, "Message")
+                    raise "Rufus::SQS::#{code} : #{message}"
                 end
             end
 
             #
-            # Generates the 'AWS x:y" authorization header value.
+            # Generate hmac sha1 signature of a given string.
+            # SQS version 2008-01-01 requires a signature of request parameter sets sorted 
+            # by parameters for authentication.
             #
-            def generate_auth_header (action, path, date, content_type)
+            def hmac_sha1_signature(string)
 
-                s = ""
-                s << action.to_s.upcase
-                s << "\n"
+              digest = OpenSSL::Digest::Digest.new 'sha1'
 
-                #s << Base64.encode64(Digest::MD5.digest(content)).strip \
-                #    if content
-                    #
-                    # documented but not necessary (not working)
-                s << "\n"
+              key = ENV['AMAZON_SECRET_ACCESS_KEY']
 
-                s << content_type
-                s << "\n"
-
-                s << date
-                s << "\n"
-
-                i = path.index '?'
-                path = path[0..i-1] if i
-                s << path
-
-                #puts ">>>#{s}<<<"
-
-                digest = OpenSSL::Digest::Digest.new 'sha1'
-
-                key = ENV['AMAZON_SECRET_ACCESS_KEY']
-
-                raise "No $AMAZON_SECRET_ACCESS_KEY env variable found" \
-                    unless key
-
-                sig = OpenSSL::HMAC.digest(digest, key, s)
-                sig = Base64.encode64(sig).strip
-
-                "AWS #{ENV['AMAZON_ACCESS_KEY_ID']}:#{sig}"
-            end
+              raise "No $AMAZON_SECRET_ACCESS_KEY env variable found" unless key
+              
+              sig = OpenSSL::HMAC.digest(digest, key, string)
+              sig = Base64.encode64(sig).strip
+              sig = URI.encode(sig, Regexp.new("[^#{URI::PATTERN::UNRESERVED}]"))
+            end 
 
     end
 
@@ -457,22 +448,31 @@ if $0 == __FILE__
         :dq => :delete_queue,
         :flush_queue => :flush_queue,
         :fq => :flush_queue,
-        :get_message => :get_message,
-        :gm => :get_message,
+        :get_messages => :get_messages,
+        :gm => :get_messages,
+        :rm => :get_messages,
+        :receive_message => :get_messages,
         :delete_message => :delete_message,
         :dm => :delete_message,
         :puts_message => :put_message,
-        :pm => :put_message
+        :pm => :put_message,
+        :sm => :send_message,
+        :get_queue_attributes => :get_queue_attributes,
+        :gqa => :get_queue_attributes,
+        :set_queue_attributes => :set_queue_attributes,
+        :sqa => :set_queue_attributes,        
     }
 
     b64 = false
     queue_host = nil
-
+    visibility_timeout = 30
+    max_number_of_messages = 10
+    
     require 'optparse'
 
     opts = OptionParser.new
 
-    opts.banner = "Usage: sqs.rb [options] {action} [queue_name] [message_id]"
+    opts.banner = "Usage: sqs.rb [options] {action} [queue_name] [receipt_handle]"
     opts.separator("")
     opts.separator("   known actions are :")
     opts.separator("")
@@ -497,6 +497,16 @@ if $0 == __FILE__
         b64 = true
     end
 
+    opts.on("-t MANDATORY", "--timeout MANDATORY", Integer, "Visibility Timeout of a Message in second(max 7200)") do |timeout|
+        visibility_timeout = timeout.to_i
+        raise "argument 'visibility timeout' should be between 0 and 7200" if max_number_of_messages > 7200 || max_number_of_messages < 0
+    end
+
+    opts.on("-m MANDATORY", "--maxmessages MANDATORY", Integer, "Max Number of Messages (max 10)") do |max_number|
+        max_number_of_messages = max_number.to_i
+        raise "argument 'max number of messages' should be less than 10" if max_number_of_messages > 10
+    end
+
     argv = opts.parse(ARGV)
 
     if argv.length < 1
@@ -506,7 +516,7 @@ if $0 == __FILE__
 
     a = argv[0]
     queue_name = argv[1]
-    message_id = argv[2]
+    receipt_handle = argv[2]
 
     action = ACTIONS[a.intern]
 
@@ -523,27 +533,27 @@ if $0 == __FILE__
     # just do it
 
     case action
-    when :list_queues, :create_queue, :delete_queue, :flush_queue
+    when :list_queues, :delete_queue, :flush_queue, :get_queue_attributes
 
         pp qs.send(action, queue_name)
 
-    when :get_message
+    when :create_queue
 
-        if message_id
-            m = qs.get_message(queue_name, message_id)
-            body = m.message_body
-            body = Base64.decode64(body) if b64
-            puts body
-        else
-            pp qs.get_messages(queue_name, :timeout => 0, :count => 255)
-        end
+        pp qs.send(action, queue_name, visibility_timeout)
+        
+    when :set_queue_attributes
+      
+        pp qs.send(action, queue_name, "VisibilityTimeout" => visibility_timeout)
+
+    when :get_messages
+        pp qs.get_messages(queue_name, "VisibilityTimeout" => visibility_timeout, "MaxNumberOfMessages" => max_number_of_messages)
 
     when :delete_message
 
-        raise "argument 'message_id' is missing" unless message_id
-        pp qs.delete_message(queue_name, message_id)
+        raise "argument 'receipt_handle' is missing" unless receipt_handle
+        pp qs.delete_message(queue_name, receipt_handle)
 
-    when :put_message
+    when :put_message, :send_message
 
         message = argv[2]
 

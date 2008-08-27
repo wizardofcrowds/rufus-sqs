@@ -6,3 +6,15 @@
 
 - todo  #17745 : moved to rufus-sqs - s142
 
+== rufus-sqs - 0.9    release TBD
+
+- now works only with AWS SQS API version "2008-01-01", but not with previous versions which will be obsolete in 2009
+- get_message is now unavailable because there is no native api call in AWS SQS API version 2008-01-01
+- delete_message takes receipt_handle instead of message_id, which is a relic of previous SQS API versions
+- put_message is now renamed as send_message, following the latest API version's naming
+- send_message returns true but not message_id
+- flush_message is no longer available
+- delete_queue deletes a queue even if there still remain some messages in the queue
+- changed the authentication method to date
+
+

@@ -9,7 +9,7 @@ require 'rake/rdoctask'
 require 'rake/testtask'
 
 
-RUFUS_SQS_VERSION = "0.8"
+RUFUS_SQS_VERSION = "0.9"
 
 #
 # GEM SPEC
@@ -18,7 +18,7 @@ spec = Gem::Specification.new do |s|
 
     s.name              = "rufus-sqs"
     s.version           = RUFUS_SQS_VERSION
-    s.authors           = [ "John Mettraux" ]
+    s.authors           = [ "John Mettraux", "Koichi Hirano" ]
     s.email             = "jmettraux@gmail.com"
     s.homepage          = "http://rufus.rubyforge.org/rufus-sqs"
     s.platform          = Gem::Platform::RUBY
